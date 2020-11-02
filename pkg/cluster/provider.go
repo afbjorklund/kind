@@ -30,6 +30,7 @@ import (
 	internalproviders "sigs.k8s.io/kind/pkg/cluster/internal/providers"
 	"sigs.k8s.io/kind/pkg/cluster/internal/providers/docker"
 	"sigs.k8s.io/kind/pkg/cluster/internal/providers/podman"
+	"sigs.k8s.io/kind/pkg/cluster/internal/providers/singularity"
 )
 
 // DefaultName is the default cluster name
@@ -125,6 +126,13 @@ func ProviderWithDocker() ProviderOption {
 func ProviderWithPodman() ProviderOption {
 	return providerRuntimeOption(func(p *Provider) {
 		p.provider = podman.NewProvider(p.logger)
+	})
+}
+
+// ProviderWithSingularity configures the provider to use singularity runtime
+func ProviderWithSingularity() ProviderOption {
+	return providerRuntimeOption(func(p *Provider) {
+		p.provider = singularity.NewProvider(p.logger)
 	})
 }
 

@@ -18,6 +18,9 @@ func GetDefault(logger log.Logger) cluster.ProviderOption {
 	case "docker":
 		logger.Warn("using docker due to KIND_EXPERIMENTAL_PROVIDER")
 		return cluster.ProviderWithDocker()
+	case "singularity":
+		logger.Warn("using singularity due to KIND_EXPERIMENTAL_PROVIDER")
+		return cluster.ProviderWithSingularity()
 	default:
 		logger.Warnf("ignoring unknown value %q for KIND_EXPERIMENTAL_PROVIDER", p)
 		return nil
