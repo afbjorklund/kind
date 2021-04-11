@@ -52,6 +52,7 @@ func NewProvider(logger log.Logger) providers.Provider {
 // see NewProvider
 type provider struct {
 	logger log.Logger
+	info   *providers.ProviderInfo
 }
 
 // String implements fmt.Stringer
@@ -250,4 +251,24 @@ func (p *provider) CollectLogs(dir string, nodes []nodes.Node) error {
 	// run and collect up all errors
 	errs = append(errs, errors.AggregateConcurrent(fns))
 	return errors.NewAggregate(errs)
+}
+
+// Info returns the provider info.
+// The info is cached on the first time of the execution.
+func (p *provider) Info() (*providers.ProviderInfo, error) {
+	if p.info == nil {
+		p.info = info()
+	}
+	return p.info, nil
+}
+
+func info() *providers.ProviderInfo {
+	info := providers.ProviderInfo{
+		Rootless: false,
+		Cgroup2: false,
+		SupportsCPUShares: true,
+		SupportsMemoryLimit: true,
+		SupportsPidsLimit: true,
+	}
+	return &info
 }
