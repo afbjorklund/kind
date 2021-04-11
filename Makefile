@@ -36,7 +36,9 @@ PATH:=$(shell . hack/build/setup-go.sh && echo "$${PATH}")
 GOROOT:=
 # enable modules
 GO111MODULE=on
-export PATH GOROOT GO111MODULE
+# disable CGO by default for static binaries
+CGO_ENABLED=0
+export PATH GOROOT GO111MODULE CGO_ENABLED
 # work around broken PATH export
 SPACE:=$(subst ,, )
 SHELL:=env PATH=$(subst $(SPACE),\$(SPACE),$(PATH)) $(SHELL)
@@ -49,7 +51,7 @@ INSTALL_DIR?=$(shell hack/build/goinstalldir.sh)
 # the output binary name, overridden when cross compiling
 KIND_BINARY_NAME?=kind
 # build flags for the kind binary
-# - reproducible builds: -trimpath and -ldlflags=-buildid=
+# - reproducible builds: -trimpath and -ldflags=-buildid=
 # - smaller binaries: -w (trim debugger data, but not panics)
 # - metadata: -X=... to bake in git commit
 KIND_BUILD_FLAGS?=-trimpath -ldflags="-buildid= -w -X=sigs.k8s.io/kind/pkg/cmd/kind/version.GitCommit=$(COMMIT)"
@@ -70,7 +72,13 @@ install: build
 # ================================= Testing ====================================
 # unit tests (hermetic)
 unit:
-	hack/make-rules/unit.sh
+	MODE=unit hack/make-rules/test.sh
+# integration tests
+integration:
+	MODE=integration hack/make-rules/test.sh
+# all tests
+test:
+	hack/make-rules/test.sh
 ################################################################################
 # ================================= Cleanup ====================================
 # standard cleanup target

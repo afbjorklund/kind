@@ -32,10 +32,10 @@ import (
 )
 
 // planCreation creates a slice of funcs that will create the containers
-func planCreation(cfg *config.Cluster) (createContainerFuncs []func() error, err error) {
+func planCreation(cfg *config.Cluster, networkName string) (createContainerFuncs []func() error, err error) {
 	// these apply to all container creation
 	nodeNamer := common.MakeNodeNamer(cfg.Name)
-	genericArgs, err := commonArgs(cfg)
+	genericArgs, err := commonArgs(cfg, networkName)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +51,8 @@ func planCreation(cfg *config.Cluster) (createContainerFuncs []func() error, err
 		// For now remote podman + multi control plane is not supported
 		apiServerPort = 0              // replaced with random ports
 		apiServerAddress = "127.0.0.1" // only the LB needs to be non-local
-		if clusterIsIPv6(cfg) {
+		// only for IPv6 only clusters
+		if cfg.Networking.IPFamily == config.IPv6Family {
 			apiServerAddress = "::1" // only the LB needs to be non-local
 		}
 		// plan loadbalancer node
@@ -120,7 +121,7 @@ func createContainer(args []string) error {
 }
 
 func clusterIsIPv6(cfg *config.Cluster) bool {
-	return cfg.Networking.IPFamily == "ipv6"
+	return cfg.Networking.IPFamily == config.IPv6Family || cfg.Networking.IPFamily == config.DualStackFamily
 }
 
 func clusterHasImplicitLoadBalancer(cfg *config.Cluster) bool {
@@ -135,13 +136,16 @@ func clusterHasImplicitLoadBalancer(cfg *config.Cluster) bool {
 }
 
 // commonArgs computes static arguments that apply to all containers
-func commonArgs(cfg *config.Cluster) ([]string, error) {
+func commonArgs(cfg *config.Cluster, networkName string) ([]string, error) {
 	// standard arguments all nodes containers need, computed once
 	args := []string{
-		"--detach", // run the container detached
-		"--tty",    // allocate a tty for entrypoint logs
+		"--detach",           // run the container detached
+		"--tty",              // allocate a tty for entrypoint logs
+		"--net", networkName, // attach to its own network
 		// label the node with the cluster ID
 		"--label", fmt.Sprintf("%s=%s", clusterLabelKey, cfg.Name),
+		// specify container implementation to systemd
+		"-e", "container=podman",
 	}
 
 	// enable IPv6 if necessary
@@ -156,6 +160,12 @@ func commonArgs(cfg *config.Cluster) ([]string, error) {
 	}
 	for key, val := range proxyEnv {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", key, val))
+	}
+
+	// handle Podman on Btrfs or ZFS same as we do with Docker
+	// https://github.com/kubernetes-sigs/kind/issues/1416#issuecomment-606514724
+	if mountDevMapper() {
+		args = append(args, "--volume", "/dev/mapper:/dev/mapper")
 	}
 
 	return args, nil
@@ -207,6 +217,11 @@ func runArgsForNode(node *config.Node, clusterIPFamily config.ClusterIPFamily, n
 		return nil, err
 	}
 	args = append(args, mappingArgs...)
+
+	switch node.Role {
+	case config.ControlPlaneRole:
+		args = append(args, "-e", "KUBECONFIG=/etc/kubernetes/admin.conf")
+	}
 
 	// finally, specify the image to run
 	_, image := sanitizeImage(node.Image)

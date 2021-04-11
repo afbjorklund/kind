@@ -5,10 +5,11 @@ menu:
     parent: "user"
     identifier: "using-wsl2"
     weight: 3
+description: |-
+  Kind can run using Windows Subsystem for Linux 2 (WSL2) on Windows 10 May 2020 Update (build 19041). 
+  
+  All the tools needed to build or run kind work in WSL2, but some extra steps are needed to switch to WSL2. This page covers these steps in brief but also links to the official documentation if you would like more details.
 ---
-# Using WSL2
-
-Kind can run using Windows Subsystem for Linux 2 (WSL2) on Windows 10 May 2020 Update (build 19041). All the tools needed to build or run kind work in WSL2, but some extra steps are needed to switch to WSL2. This page covers these steps in brief but also links to the official documentation if you would like more details.
 
 ## Getting Windows 10
 
@@ -16,7 +17,7 @@ Download latest ISO at https://www.microsoft.com/en-us/software-download/windows
 
 ### Installing on a virtual machine
 
-> Note: this currently only works with Intel processors. The Hyper-V hypervisor used by WSL2 cannot run underneath another hypervisor on AMD processors.
+> **NOTE**: this currently only works with Intel processors. The Hyper-V hypervisor used by WSL2 cannot run underneath another hypervisor on AMD processors.
 
 Required Settings
 
@@ -85,6 +86,6 @@ nodes:
 
 ## Helpful Tips for WSL2
 
-- If you want to shutdown the WSL2 instance to save memory or "reboot", open an admin PowerShell prompt and run `wsl <distro> --shutdown`. Closing a WSL2 window doesn't shut it down automatically.
+- If you want to terminate the WSL2 instance to save memory or "reboot", open an admin PowerShell prompt and run `wsl --terminate <distro>`. Closing a WSL2 window doesn't shut it down automatically.
 - You can check the status of all installed distros with `wsl --list --verbose`.
 - If you had a distro installed with WSL1, you can convert it to WSL2 with `wsl --set-version <distro> 2`

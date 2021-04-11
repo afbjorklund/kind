@@ -19,18 +19,53 @@
 
 # start from ubuntu 20.10, this image is reasonably small as a starting point
 # for a kubernetes node image, it doesn't contain much we don't need
-FROM ubuntu:20.10
+ARG BASE_IMAGE=ubuntu:20.10
+FROM $BASE_IMAGE
+
+# `docker buildx` automatically sets this arg value, but we add the arg for
+# regular `docker bulid` invocations to force a selection
+ARG TARGETARCH
 
 # Configure containerd and runc binaries from kind-ci/containerd-nightlies repository
 # The repository contains latest stable releases and nightlies built for multiple architectures
-ARG CONTAINERD_VERSION="v1.4.0-106-gce4439a8"
-# Configure CNI binaries
-ARG CNI_VERSION="v0.8.7"
-# Configure crictl binary from upstream
-ARG CRICTL_VERSION="v1.19.0"
+ARG CONTAINERD_VERSION="1.5.0-beta.4-91-g1b05b605c"
+ARG CONTAINERD_BASE_URL="https://github.com/kind-ci/containerd-nightlies/releases/download/containerd-${CONTAINERD_VERSION}"
+ARG CONTAINERD_URL="${CONTAINERD_BASE_URL}/containerd-${CONTAINERD_VERSION}.linux-${TARGETARCH}.tar.gz"
+ARG CONTAINERD_AMD64_SHA256SUM="69a52f78d2f8d63f599ac1ec6726a1156ac09f76b7d36323032e4b5bd977bc8b"
+ARG CONTAINERD_ARM64_SHA256SUM="9e83ffd3e3c6dadae94e1462115e8fbe9c121357605dd903298e69eaa9f740bd"
+ARG CONTAINERD_PPC64LE_SHA256SUM="3cb47b897f6df5083641a6e54f1199e5394c7aeba7a3e7dfe3368ca472e940b1"
 
-# copy in static files (configs, scripts)
-COPY files/ /
+ARG RUNC_URL="${CONTAINERD_BASE_URL}/runc.${TARGETARCH}"
+ARG RUNC_AMD64_SHA256SUM="c2ac9c6fb5d9e2c20e61d9411ebdb97edcc9d54a6836146f58ceb45a9b3b84e7"
+ARG RUNC_ARM64_SHA256SUM="cffe4ae1cf6d709b84de77257fa088345ded878924e43371651b9dad1ca3617d"
+ARG RUNC_PPC64LE_SHA256SUM="4a2c8848eee7ed60eb282fd2242fcbf066c7cfd285140eb3ab9871d213f7fed1"
+
+# Configure crictl binary from upstream
+ARG CRICTL_VERSION="v1.20.0"
+ARG CRICTL_URL="https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${TARGETARCH}.tar.gz"
+ARG CRICTL_AMD64_SHA256SUM="44d5f550ef3f41f9b53155906e0229ffdbee4b19452b4df540265e29572b899c"
+ARG CRICTL_ARM64_SHA256SUM="eda6879710eb046d335162d4afe8494c6f8161142ad3188022852f64b92806a8"
+ARG CRICTL_PPC64LE_SHA256SUM="da0c052983ba884f9605b14bf627664df67fcdb41c7f6908368bf4745f889b26"
+
+# Configure CNI binaries from upstream
+ARG CNI_PLUGINS_VERSION="v0.9.1"
+ARG CNI_PLUGINS_TARBALL="${CNI_PLUGINS_VERSION}/cni-plugins-linux-${TARGETARCH}-${CNI_PLUGINS_VERSION}.tgz"
+ARG CNI_PLUGINS_URL="https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_TARBALL}"
+ARG CNI_PLUGINS_AMD64_SHA256SUM="962100bbc4baeaaa5748cdbfce941f756b1531c2eadb290129401498bfac21e7"
+ARG CNI_PLUGINS_ARM64_SHA256SUM="ef17764ffd6cdcb16d76401bac1db6acc050c9b088f1be5efa0e094ea3b01df0"
+ARG CNI_PLUGINS_PPC64LE_SHA256SUM="5bd3c82ef248e5c6cc388f25545aa5a7d318778e5f9bc0a31475361bb27acefe"
+
+# copy in static files
+# all scripts are 0755: http://www.filepermissions.com/file-permission/0755
+COPY --chmod=0755 files/usr/local/bin/* /usr/local/bin/
+
+# all configs are 0644: http://www.filepermissions.com/file-permission/0644
+COPY --chmod=0644 files/etc/* /etc/
+COPY --chmod=0644 files/etc/containerd/* /etc/containerd/
+COPY --chmod=0644 files/etc/default/* /etc/default/
+COPY --chmod=0644 files/etc/sysctl.d/* /etc/sysctl.d/
+COPY --chmod=0644 files/etc/systemd/system/* /etc/systemd/system/
+COPY --chmod=0644 files/etc/systemd/system/kubelet.service.d/* /etc/systemd/system/kubelet.service.d/
 
 # Install dependencies, first from apt, then from release tarballs.
 # NOTE: we use one RUN to minimize layers.
@@ -55,15 +90,13 @@ COPY files/ /
 # Next we download and extract crictl and CNI plugin binaries from upstream.
 #
 # Next we ensure the /etc/kubernetes/manifests directory exists. Normally
-# a kubeadm debain / rpm package would ensure that this exists but we install
+# a kubeadm debian / rpm package would ensure that this exists but we install
 # freshly built binaries directly when we build the node image.
 #
 # Finally we adjust tempfiles cleanup to be 1 minute after "boot" instead of 15m
 # This is plenty after we've done initial setup for a node, but before we are
 # likely to try to export logs etc.
-RUN echo "Ensuring scripts are executable ..." \
-    && chmod +x /usr/local/bin/clean-install /usr/local/bin/entrypoint \
- && echo "Installing Packages ..." \
+RUN echo "Installing Packages ..." \
     && DEBIAN_FRONTEND=noninteractive clean-install \
       systemd \
       conntrack iptables iproute2 ethtool socat util-linux mount ebtables udev kmod \
@@ -79,32 +112,47 @@ RUN echo "Ensuring scripts are executable ..." \
     && rm -f /lib/systemd/system/basic.target.wants/* \
     && echo "ReadKMsg=no" >> /etc/systemd/journald.conf \
     && ln -s "$(which systemd)" /sbin/init \
-    && export ARCH=$(dpkg --print-architecture | sed 's/ppc64el/ppc64le/' | sed 's/armhf/arm/') \
  && echo "Enabling kubelet ... " \
     && systemctl enable kubelet.service \
  && echo "Installing containerd ..." \
-    && export CONTAINERD_BASE_URL="https://github.com/kind-ci/containerd-nightlies/releases/download/containerd-${CONTAINERD_VERSION#v}" \
-    && curl -sSL --retry 5 --output /tmp/containerd.tgz "${CONTAINERD_BASE_URL}/containerd-${CONTAINERD_VERSION#v}.linux-${ARCH}.tar.gz" \
-    && tar -C /usr/local -xzvf /tmp/containerd.tgz \
-    && rm -rf /tmp/containerd.tgz \
+    && curl -sSL --retry 5 --output /tmp/containerd.${TARGETARCH}.tgz "${CONTAINERD_URL}" \
+    && echo "${CONTAINERD_AMD64_SHA256SUM}  /tmp/containerd.amd64.tgz" | tee /tmp/containerd.sha256 \
+    && echo "${CONTAINERD_ARM64_SHA256SUM}  /tmp/containerd.arm64.tgz" | tee -a /tmp/containerd.sha256 \
+    && echo "${CONTAINERD_PPC64LE_SHA256SUM}  /tmp/containerd.ppc64le.tgz" | tee -a /tmp/containerd.sha256 \
+    && sha256sum --ignore-missing -c /tmp/containerd.sha256 \
+    && rm -f /tmp/containerd.sha256 \
+    && tar -C /usr/local -xzvf /tmp/containerd.${TARGETARCH}.tgz \
+    && rm -rf /tmp/containerd.${TARGETARCH}.tgz \
     && rm -f /usr/local/bin/containerd-stress /usr/local/bin/containerd-shim-runc-v1 \
-    && curl -sSL --retry 5 --output /usr/local/sbin/runc "${CONTAINERD_BASE_URL}/runc.${ARCH}" \
+    && curl -sSL --retry 5 --output /tmp/runc.${TARGETARCH} "${RUNC_URL}" \
+    && echo "${RUNC_AMD64_SHA256SUM}  /tmp/runc.amd64" | tee /tmp/runc.sha256 \
+    && echo "${RUNC_ARM64_SHA256SUM}  /tmp/runc.arm64" | tee -a /tmp/runc.sha256 \
+    && echo "${RUNC_PPC64LE_SHA256SUM}  /tmp/runc.ppc64le" | tee -a /tmp/runc.sha256 \
+    && sha256sum --ignore-missing -c /tmp/runc.sha256 \
+    && mv /tmp/runc.${TARGETARCH} /usr/local/sbin/runc \
     && chmod 755 /usr/local/sbin/runc \
     && containerd --version \
     && runc --version \
     && systemctl enable containerd \
  && echo "Installing crictl ..." \
-    && export CRICTL_URL="https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-${ARCH}.tar.gz" \
-    && curl -sSL --retry 5 --output /tmp/crictl.tgz "${CRICTL_URL}" \
-    && tar -C /usr/local/bin -xzvf /tmp/crictl.tgz \
-    && rm -rf /tmp/crictl.tgz \
- && echo "Installing CNI binaries ..." \
-    && export CNI_TARBALL="${CNI_VERSION}/cni-plugins-linux-${ARCH}-${CNI_VERSION}.tgz" \
-    && export CNI_URL="https://github.com/containernetworking/plugins/releases/download/${CNI_TARBALL}" \
-    && curl -sSL --retry 5 --output /tmp/cni.tgz "${CNI_URL}" \
+    && curl -sSL --retry 5 --output /tmp/crictl.${TARGETARCH}.tgz "${CRICTL_URL}" \
+    && echo "${CRICTL_AMD64_SHA256SUM}  /tmp/crictl.amd64.tgz" | tee /tmp/crictl.sha256 \
+    && echo "${CRICTL_ARM64_SHA256SUM}  /tmp/crictl.arm64.tgz" | tee -a /tmp/crictl.sha256 \
+    && echo "${CRICTL_PPC64LE_SHA256SUM}  /tmp/crictl.ppc64le.tgz" | tee -a /tmp/crictl.sha256 \
+    && sha256sum --ignore-missing -c /tmp/crictl.sha256 \
+    && rm -f /tmp/crictl.sha256 \
+    && tar -C /usr/local/bin -xzvf /tmp/crictl.${TARGETARCH}.tgz \
+    && rm -rf /tmp/crictl.${TARGETARCH}.tgz \
+ && echo "Installing CNI plugin binaries ..." \
+    && curl -sSL --retry 5 --output /tmp/cni.${TARGETARCH}.tgz "${CNI_PLUGINS_URL}" \
+    && echo "${CNI_PLUGINS_AMD64_SHA256SUM}  /tmp/cni.amd64.tgz" | tee /tmp/cni.sha256 \
+    && echo "${CNI_PLUGINS_ARM64_SHA256SUM}  /tmp/cni.arm64.tgz" | tee -a /tmp/cni.sha256 \
+    && echo "${CNI_PLUGINS_PPC64LE_SHA256SUM}  /tmp/cni.ppc64le.tgz" | tee -a /tmp/cni.sha256 \
+    && sha256sum --ignore-missing -c /tmp/cni.sha256 \
+    && rm -f /tmp/cni.sha256 \
     && mkdir -p /opt/cni/bin \
-    && tar -C /opt/cni/bin -xzvf /tmp/cni.tgz \
-    && rm -rf /tmp/cni.tgz \
+    && tar -C /opt/cni/bin -xzvf /tmp/cni.${TARGETARCH}.tgz \
+    && rm -rf /tmp/cni.${TARGETARCH}.tgz \
     && find /opt/cni/bin -type f -not \( \
          -iname host-local \
          -o -iname ptp \
@@ -115,7 +163,9 @@ RUN echo "Ensuring scripts are executable ..." \
  && echo "Ensuring /etc/kubernetes/manifests" \
     && mkdir -p /etc/kubernetes/manifests \
  && echo "Adjusting systemd-tmpfiles timer" \
-    && sed -i /usr/lib/systemd/system/systemd-tmpfiles-clean.timer -e 's#OnBootSec=.*#OnBootSec=1min#'
+    && sed -i /usr/lib/systemd/system/systemd-tmpfiles-clean.timer -e 's#OnBootSec=.*#OnBootSec=1min#' \
+ && echo "Disabling udev" \
+    && systemctl disable udev.service
 
 # tell systemd that it is in docker (it will check for the container env)
 # https://systemd.io/CONTAINER_INTERFACE/

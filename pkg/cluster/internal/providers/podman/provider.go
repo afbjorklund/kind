@@ -19,6 +19,7 @@ package podman
 import (
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/version"
 
 	"sigs.k8s.io/kind/pkg/cluster/nodes"
 	"sigs.k8s.io/kind/pkg/cluster/nodeutils"
@@ -52,6 +54,7 @@ func NewProvider(logger log.Logger) providers.Provider {
 // see NewProvider
 type provider struct {
 	logger log.Logger
+	info   *providers.ProviderInfo
 }
 
 // String implements fmt.Stringer
@@ -67,16 +70,21 @@ func (p *provider) Provision(status *cli.Status, cfg *config.Cluster) (err error
 		return err
 	}
 
-	// kind doesn't work with podman rootless, surface an error
-	if os.Geteuid() != 0 {
-		p.logger.Errorf("podman provider does not work properly in rootless mode")
-		os.Exit(1)
-	}
-
 	// TODO: validate cfg
 	// ensure node images are pulled before actually provisioning
 	if err := ensureNodeImages(p.logger, status, cfg); err != nil {
 		return err
+	}
+
+	// ensure the pre-requisite network exists
+	networkName := fixedNetworkName
+	if n := os.Getenv("KIND_EXPERIMENTAL_PODMAN_NETWORK"); n != "" {
+		p.logger.Warn("WARNING: Overriding podman network due to KIND_EXPERIMENTAL_PODMAN_NETWORK")
+		p.logger.Warn("WARNING: Here be dragons! This is not supported currently.")
+		networkName = n
+	}
+	if err := ensureNetwork(networkName); err != nil {
+		return errors.Wrap(err, "failed to ensure podman network")
 	}
 
 	// actually provision the cluster
@@ -85,7 +93,7 @@ func (p *provider) Provision(status *cli.Status, cfg *config.Cluster) (err error
 	defer func() { status.End(err == nil) }()
 
 	// plan creating the containers
-	createContainerFuncs, err := planCreation(cfg)
+	createContainerFuncs, err := planCreation(cfg, networkName)
 	if err != nil {
 		return err
 	}
@@ -174,7 +182,46 @@ func (p *provider) GetAPIServerEndpoint(cluster string) (string, error) {
 		return "", errors.Wrap(err, "failed to get api server endpoint")
 	}
 
-	// retrieve the specific port mapping using podman inspect
+	// TODO: get rid of this once podman settles on how to get the port mapping using podman inspect
+	// This is only used to get the Kubeconfig server field
+	v, err := getPodmanVersion()
+	if err != nil {
+		return "", errors.Wrap(err, "failed to check podman version")
+	}
+	// podman inspect was broken between 2.2.0 and 3.0.0
+	// https://github.com/containers/podman/issues/8444
+	if v.AtLeast(version.MustParseSemantic("2.2.0")) &&
+		v.LessThan(version.MustParseSemantic("3.0.0")) {
+		p.logger.Warnf("WARNING: podman version %s not fully supported, please use versions 3.0.0+")
+
+		cmd := exec.Command(
+			"podman", "inspect",
+			"--format",
+			"{{range .NetworkSettings.Ports }}{{range .}}{{.HostIP}}/{{.HostPort}}{{end}}{{end}}",
+			n.String(),
+		)
+
+		lines, err := exec.OutputLines(cmd)
+		if err != nil {
+			return "", errors.Wrap(err, "failed to get api server port")
+		}
+		if len(lines) != 1 {
+			return "", errors.Errorf("network details should only be one line, got %d lines", len(lines))
+		}
+		// output is in the format IP/Port
+		parts := strings.Split(strings.TrimSpace(lines[0]), "/")
+		if len(parts) != 2 {
+			return "", errors.Errorf("network details should be in the format IP/Port, received: %s", parts)
+		}
+		host := parts[0]
+		port, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return "", errors.Errorf("network port not an integer: %v", err)
+		}
+
+		return net.JoinHostPort(host, strconv.Itoa(port)), nil
+	}
+
 	cmd := exec.Command(
 		"podman", "inspect",
 		"--format",
@@ -223,6 +270,7 @@ func (p *provider) GetAPIServerEndpoint(cluster string) (string, error) {
 			}
 		}
 	}
+
 	var portMappings19 []portMapping19
 	if err := json.Unmarshal([]byte(lines[0]), &portMappings19); err != nil {
 		return "", errors.Errorf("invalid network details: %v", err)
@@ -233,7 +281,7 @@ func (p *provider) GetAPIServerEndpoint(cluster string) (string, error) {
 		}
 	}
 
-	return "", errors.Errorf("unable to find apiserver endpoint information")
+	return "", errors.Errorf("failed to get api server port")
 }
 
 // GetAPIServerInternalEndpoint is part of the providers.Provider interface
@@ -247,14 +295,8 @@ func (p *provider) GetAPIServerInternalEndpoint(cluster string) (string, error) 
 	if err != nil {
 		return "", errors.Wrap(err, "failed to get apiserver endpoint")
 	}
-	// TODO: check cluster IP family and return the correct IP
-	// This means IPv6 singlestack is broken on podman
-	ipv4, _, err := n.IP()
-	if err != nil {
-		return "", errors.Wrap(err, "failed to get apiserver IP")
-	}
-	return net.JoinHostPort(ipv4, fmt.Sprintf("%d", common.APIServerInternalPort)), nil
-
+	// NOTE: we're using the nodes's hostnames which are their names
+	return net.JoinHostPort(n.String(), fmt.Sprintf("%d", common.APIServerInternalPort)), nil
 }
 
 // node returns a new node handle for this provider
@@ -311,4 +353,50 @@ func (p *provider) CollectLogs(dir string, nodes []nodes.Node) error {
 	// run and collect up all errors
 	errs = append(errs, errors.AggregateConcurrent(fns))
 	return errors.NewAggregate(errs)
+}
+
+// Info returns the provider info.
+// The info is cached on the first time of the execution.
+func (p *provider) Info() (*providers.ProviderInfo, error) {
+	if p.info == nil {
+		p.info = info(p.logger)
+	}
+	return p.info, nil
+}
+
+func info(logger log.Logger) *providers.ProviderInfo {
+	euid := os.Geteuid()
+	info := &providers.ProviderInfo{
+		Rootless: euid != 0,
+	}
+	if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err == nil {
+		info.Cgroup2 = true
+		// Unlike `docker info`, `podman info` does not print available cgroup controllers.
+		// So we parse "cgroup.subtree_control" file by ourselves.
+		subtreeControl := "/sys/fs/cgroup/cgroup.subtree_control"
+		if info.Rootless {
+			// Change subtreeControl to the path of the systemd user-instance.
+			// Non-systemd hosts are not supported.
+			subtreeControl = fmt.Sprintf("/sys/fs/cgroup/user.slice/user-%d.slice/user@%d.service/cgroup.subtree_control", euid, euid)
+		}
+		if subtreeControlBytes, err := ioutil.ReadFile(subtreeControl); err != nil {
+			logger.Warnf("failed to read %q: %+v", subtreeControl, err)
+		} else {
+			for _, controllerName := range strings.Fields(string(subtreeControlBytes)) {
+				switch controllerName {
+				case "cpu":
+					info.SupportsCPUShares = true
+				case "memory":
+					info.SupportsMemoryLimit = true
+				case "pids":
+					info.SupportsPidsLimit = true
+				}
+			}
+		}
+	} else if !info.Rootless {
+		info.SupportsCPUShares = true
+		info.SupportsMemoryLimit = true
+		info.SupportsPidsLimit = true
+	}
+	return info
 }
